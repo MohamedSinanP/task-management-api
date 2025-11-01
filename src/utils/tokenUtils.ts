@@ -23,7 +23,7 @@ export const verifyAccessToken = (token: string): AccessPayload | null => {
 
 export const verifyRefreshToken = (token: string): AccessPayload | null => {
   try {
-    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET) as AccessPayload;
+    const decoded = jwt.verify(token, REFRESH_TOKEN_SECRET) as AccessPayload;
     return decoded;
   } catch (err) {
     return null;

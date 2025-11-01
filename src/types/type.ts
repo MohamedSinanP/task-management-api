@@ -31,6 +31,7 @@ export interface ITask extends Document {
   projectId: mongoose.Types.ObjectId | IProject;
   assignedTo?: mongoose.Types.ObjectId | IUser;
   createdBy: mongoose.Types.ObjectId | IUser;
+  isDeleted: boolean;
 }
 
 export interface IProject extends Document {
@@ -38,6 +39,7 @@ export interface IProject extends Document {
   description?: string;
   createdBy: mongoose.Types.ObjectId;
   members: mongoose.Types.ObjectId[];
+  isDeleted: boolean;
 }
 
 export interface INotification extends Document {
@@ -53,6 +55,7 @@ export interface INotification extends Document {
 export interface AccessPayload {
   id: string;
   role: string;
+  name?: string;
 }
 
 export interface AuthenticatedRequest extends Request {

@@ -2,26 +2,47 @@ import { Request, Response } from "express";
 import { Task } from "../models/taskModel";
 import { Project } from "../models/projectModel";
 import { ActivityLog } from "../models/activeLogModel";
-import { getIO, sendAdminNotification, sendNotification } from "../socket";
+import { getIO, sendNotification } from "../socket";
 import { Notification } from "../models/notificationModel";
+import { User } from "../models/userModel";
 
-// Create new task (Admin only)
+// ==========================
+// SOCKET EVENT CONSTANTS
+// ==========================
+const SOCKET_EVENTS = {
+  TASK_ASSIGNED: "taskAssigned",
+  TASK_UPDATED: "taskUpdated",
+  TASK_DELETED: "taskDeleted",
+};
+
+const ROOM_PREFIX = {
+  USER: "user:",
+  TASK: "task:",
+};
+
+// =============================================================
+//  CREATE TASK (Admin only)
+// =============================================================
 export const createTask = async (req: Request, res: Response) => {
   try {
     const { title, description, status, priority, dueDate, projectId, assignedTo } = req.body;
-    const user = (req as any).user;
+    const user = (req as any).user; // logged-in user
 
+    // Only admin can create a task
     if (user.role !== "admin") {
       return res.status(403).json({ message: "Only admin can create tasks" });
     }
 
+    // Validate required fields
     if (!title || !projectId || !assignedTo) {
       return res.status(400).json({ message: "Title, projectId, and assignedTo are required" });
     }
 
+    // Check if project exists
     const project = await Project.findById(projectId);
     if (!project) return res.status(404).json({ message: "Project not found" });
 
+    // Create the new task
     const task = await Task.create({
       title,
       description,
@@ -42,34 +63,32 @@ export const createTask = async (req: Request, res: Response) => {
       type: "task_assigned",
     });
 
-    // Populate notification
-    const populatedNotification = await Notification.findById(notification._id)
-      .populate("taskId", "title status priority")
-      .populate("projectId", "name");
-
+    // Populate for returning and emitting
     const populatedTask = await task.populate([
       { path: "projectId", select: "name" },
       { path: "assignedTo", select: "name email" },
       { path: "createdBy", select: "name email" },
     ]);
-    // Emit Socket.IO events
-    const io = getIO();
 
-    // Send to project room
-    console.log("assinged user id : ", assignedTo.toString());
+    const populatedNotification = await Notification.findById(notification._id)
+      .populate("taskId", "title status priority")
+      .populate("projectId", "name");
 
-    io.to(`user:${assignedTo.toString()}`).emit("taskAssigned", populatedTask);
+    // ==========================
+    // SOCKET EMITS
+    // ==========================
+    try {
+      const io = getIO();
 
-    // Send notification to assigned user
-    sendNotification(assignedTo.toString(), populatedNotification);
+      // Send to assigned user
+      io.to(`${ROOM_PREFIX.USER}${assignedTo}`).emit(SOCKET_EVENTS.TASK_ASSIGNED, populatedTask);
 
-    // Send to admin dashboard
-    sendAdminNotification({
-      type: "task_created",
-      task,
-      notification: populatedNotification,
-    });
+      // Send structured notification to user
+      sendNotification(String(assignedTo), populatedNotification);
 
+    } catch (socketError) {
+      console.error("Socket emit failed:", socketError);
+    }
 
     res.status(201).json({ message: "Task created successfully", task: populatedTask });
   } catch (error: any) {
@@ -77,19 +96,20 @@ export const createTask = async (req: Request, res: Response) => {
   }
 };
 
-
-//  Get all tasks 
+// =============================================================
+// GET ALL TASKS (Admin or Assigned User)
+// =============================================================
 export const getAllTasks = async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     let tasks;
 
     if (user.role === "admin") {
-      tasks = await Task.find()
+      tasks = await Task.find({ isDeleted: false })
         .populate("projectId", "name")
         .populate("assignedTo", "name email");
     } else {
-      tasks = await Task.find({ assignedTo: user.id })
+      tasks = await Task.find({ assignedTo: user.id, isDeleted: false })
         .populate("projectId", "name")
         .populate("assignedTo", "name email");
     }
@@ -100,7 +120,9 @@ export const getAllTasks = async (req: Request, res: Response) => {
   }
 };
 
-// Get single task
+// =============================================================
+// GET SINGLE TASK
+// =============================================================
 export const getTaskById = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -115,7 +137,7 @@ export const getTaskById = async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Task not found" });
     }
 
-    // Restrict access if not admin or assigned user
+    // Access control
     if (user.role !== "admin" && task.assignedTo?.toString() !== user.id.toString()) {
       return res.status(403).json({ message: "Not authorized to view this task" });
     }
@@ -126,99 +148,116 @@ export const getTaskById = async (req: Request, res: Response) => {
   }
 };
 
-// Update task
+// =============================================================
+// UPDATE TASK (Admin or Assigned User)
+// =============================================================
 export const updateTask = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const updates = req.body;
     const user = (req as any).user;
 
-    const task = await Task.findById(id);
-    if (!task) {
-      return res.status(404).json({ message: "Task not found" });
-    }
 
-    // Role-based check
+    const task = await Task.findById(id);
+    if (!task) return res.status(404).json({ message: "Task not found" });
+
+    // Role-based access check
     if (user.role !== "admin" && task.assignedTo?.toString() !== user.id.toString()) {
       return res.status(403).json({ message: "Not authorized to update this task" });
     }
 
-    // Compare old vs new for activity log
+    // Identify changed fields
     const changedFields: any[] = [];
-    const updatableFields = ["title", "description", "status", "priority", "dueDate", "assignedTo"];
+    const updatableFields = ["title", "description", "status", "priority", "dueDate", "assignedTo", "projectId"];
 
     for (const key of updatableFields) {
-      if (updates[key] && updates[key] !== (task as any)[key]) {
+      if (!Object.prototype.hasOwnProperty.call(updates, key)) continue;
+
+      const oldValue = (task as any)[key];
+      const newValue = updates[key];
+
+      const oldValStr = oldValue?.toString?.() ?? oldValue;
+      const newValStr = newValue?.toString?.() ?? newValue;
+
+      if (oldValStr !== newValStr) {
         changedFields.push({
           field: key,
-          oldValue: (task as any)[key],
-          newValue: updates[key],
+          oldValue: oldValue,
+          newValue: newValue,
         });
-        (task as any)[key] = updates[key];
+        (task as any)[key] = newValue;
       }
     }
 
     await task.save();
 
-    // ---- Notification logic ----
+
+    await task.save();
+
+    const io = getIO();
     const notifications: any[] = [];
     const notificationsToEmit: any[] = [];
 
-    // Find which fields changed
+    // --- Detect major changes ---
     const assignedChange = changedFields.find((f) => f.field === "assignedTo");
     const statusChange = changedFields.find((f) => f.field === "status");
 
-    // Notify assigned user if they got newly assigned
+    // Notify new assigned user (if reassigned)
     if (assignedChange) {
-      const notification = {
+      notifications.push({
         userId: updates.assignedTo,
         message: `You have been assigned to task "${task.title}"`,
-        type: "task_assigned" as const,
+        type: "task_assigned",
         taskId: task._id,
         projectId: task.projectId,
-      };
-      notifications.push(notification);
+      });
+      io.to(`${ROOM_PREFIX.USER}${updates.assignedTo}`).emit(SOCKET_EVENTS.TASK_ASSIGNED, task);
     }
 
-    // Notify the assigned user when the task is updated (but not if they made the update)
-    if ((statusChange || changedFields.length > 0) && task.assignedTo?.toString() !== user.id.toString()) {
-      const notification = {
+    // Notify assigned user if admin updated their task
+    if (
+      user.role === "admin" &&
+      (statusChange || changedFields.length > 0) &&
+      task.assignedTo?.toString() !== user.id.toString()
+    ) {
+      notifications.push({
         userId: task.assignedTo,
-        message: `Task "${task.title}" has been updated`,
-        type: "task_updated" as const,
+        message: `Task "${task.title}" has been updated by the admin`,
+        type: "task_updated",
         taskId: task._id,
         projectId: task.projectId,
-      };
-      notifications.push(notification);
+      });
     }
 
-    // Notify admin if non-admin updated the task
-    if (user.role !== "admin" && task.createdBy?.toString() !== user.id.toString()) {
-      const notification = {
-        userId: task.createdBy,
-        message: `Task "${task.title}" was updated by ${user.name}`,
-        type: "task_updated" as const,
-        taskId: task._id,
-        projectId: task.projectId,
-      };
-      notifications.push(notification);
-    }
-
-    // Bulk insert notifications
-    if (notifications.length > 0) {
-      const createdNotifications = await Notification.insertMany(notifications);
-
-      // Populate notifications for socket emission
-      for (const notif of createdNotifications) {
-        const populated = await Notification.findById(notif._id)
-          .populate("taskId", "title status priority")
-          .populate("projectId", "name")
-          .populate("userId", "name email role");
-        notificationsToEmit.push(populated);
+    // Notify admin if user updated their assigned task
+    if (user.role !== "admin") {
+      const admin = await User.findOne({ role: "admin" }).select("_id name");
+      if (admin) {
+        notifications.push({
+          userId: admin._id,
+          message: `Task "${task.title}" was updated by ${user.name}`,
+          type: "task_updated",
+          taskId: task._id,
+          projectId: task.projectId,
+        });
       }
     }
 
-    // Log changes if any
+    // Save notifications & emit them
+    if (notifications.length > 0) {
+      const created = await Notification.insertMany(notifications, { ordered: false });
+      const populated = await Notification.find({
+        _id: { $in: created.map((n) => n._id) },
+      })
+        .populate("taskId", "title status priority")
+        .populate("projectId", "name")
+        .populate("userId", "name email role");
+
+      populated.forEach((notif) => sendNotification(notif.userId._id.toString(), notif));
+      notificationsToEmit.push(...populated);
+    }
+
+    // Log changes
     if (changedFields.length > 0) {
       await ActivityLog.create({
         taskId: task._id,
@@ -227,28 +266,15 @@ export const updateTask = async (req: Request, res: Response) => {
       });
     }
 
-    // Emit socket events
-    const io = getIO();
+    // Populate task for return & emit
     const populatedTask = await task.populate([
       { path: "projectId", select: "name" },
       { path: "assignedTo", select: "name email" },
       { path: "createdBy", select: "name email" },
     ]);
 
-    // Send to task room
-    io.to(`task:${String(task._id)}`).emit("taskUpdated", populatedTask);
-    // Send notifications via socket
-    notificationsToEmit.forEach((notification) => {
-      sendNotification(notification.userId._id.toString(), notification);
-    });
-
-    // Send to admin dashboard
-    sendAdminNotification({
-      type: "task_updated",
-      task: populatedTask,
-      updatedBy: user,
-      changes: changedFields,
-    });
+    // Emit task update to all users in task room
+    io.to(`${ROOM_PREFIX.TASK}${task._id}`).emit(SOCKET_EVENTS.TASK_UPDATED, populatedTask);
 
     res.status(200).json({
       message: "Task updated successfully",
@@ -259,7 +285,9 @@ export const updateTask = async (req: Request, res: Response) => {
   }
 };
 
-//  Delete task (Admin only)
+// =============================================================
+// DELETE TASK (Admin only)
+// =============================================================
 export const deleteTask = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -274,13 +302,36 @@ export const deleteTask = async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Task not found" });
     }
 
-    const projectId = task.projectId.toString();
+    if (task.isDeleted) {
+      return res.status(400).json({ message: "Task is already deleted" });
+    }
 
-    await task.deleteOne();
+    task.isDeleted = true;
+    await task.save();
+    const newNotification = await Notification.create({
+      userId: task.assignedTo,
+      message: `The task you were assigned to, "${task.title}", has been deleted by admin.`,
+      type: "task_deleted",
+      taskId: task._id,
+      projectId: task.projectId,
+    });
+    const populatedNotification = await Notification.find({ _id: newNotification._id })
+      .populate("taskId", "title status priority")
+      .populate("projectId", "name")
+      .populate("userId", "name email role");
 
-    // Emit deletion to project room
-    const io = getIO();
-    io.to(`task:${id}`).emit("taskDeleted", { _id: id });
+    // Emit to all listeners of this task and assigned user
+    try {
+      const io = getIO();
+      io.to(`${ROOM_PREFIX.TASK}${id}`).emit(SOCKET_EVENTS.TASK_DELETED, { _id: id });
+      sendNotification(newNotification.userId.toString(), populatedNotification);
+      // if (task.assignedTo) {
+      //   io.to(`${ROOM_PREFIX.USER}${task.assignedTo}`).emit(SOCKET_EVENTS.TASK_DELETED, { _id: id });
+      // }
+
+    } catch (socketError) {
+      console.error("Socket emit failed:", socketError);
+    }
 
     res.status(200).json({ message: "Task deleted successfully" });
   } catch (error: any) {

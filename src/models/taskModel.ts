@@ -12,7 +12,8 @@ const taskSchema = new Schema<ITask>(
     dueDate: { type: Date },
     projectId: { type: Schema.Types.ObjectId, ref: "Project", required: true },
     assignedTo: { type: Schema.Types.ObjectId, ref: "User" },
-    createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true }
+    createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    isDeleted: { type: Boolean, default: false }
   },
   { timestamps: true }
 );

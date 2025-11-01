@@ -1,16 +1,14 @@
 import cron from "node-cron";
 import { Task } from "../models/taskModel";
-import { Project } from "../models/projectModel";
 import { sendMail } from "../utils/mailService";
 
 // Runs every Friday at 9:00 AM
 cron.schedule("0 9 * * 5", async () => {
-  console.log("📊 Running Weekly Summary Job (Friday 9 AM)...");
+  console.log("Running Weekly Summary Job...");
 
   try {
-    // 1️⃣ Get current week range
     const now = new Date();
-    const currentDay = now.getDay(); // Sunday=0, Monday=1
+    const currentDay = now.getDay();
     const monday = new Date(now);
     monday.setDate(now.getDate() - currentDay + 1);
     monday.setHours(0, 0, 0, 0);
@@ -21,75 +19,78 @@ cron.schedule("0 9 * * 5", async () => {
 
     console.log("Weekly range:", monday, "→", sunday);
 
-    // 2️⃣ Fetch all projects with their owners
-    const projects = await Project.find().populate("createdBy", "email name");
+    const tasks = await Task.find({
+      isDeleted: false,
+      $or: [
+        { createdAt: { $gte: monday, $lte: sunday } },
+        { updatedAt: { $gte: monday, $lte: sunday } },
+        { dueDate: { $gte: monday, $lte: sunday } },
+      ],
+    })
+      .populate("assignedTo", "name email")
+      .populate("projectId", "name");
 
-    // 3️⃣ For each project, find tasks relevant to this week
-    for (const project of projects) {
-      const tasks = await Task.find({
-        projectId: project._id,
-        $or: [
-          { createdAt: { $gte: monday, $lte: sunday } },
-          { updatedAt: { $gte: monday, $lte: sunday } },
-          { dueDate: { $gte: monday, $lte: sunday } },
-        ],
-      }).populate("assignedTo", "name email");
+    if (tasks.length === 0) {
+      console.log("No tasks found this week.");
+      return;
+    }
 
-      if (tasks.length === 0) continue; // no updates this week
+    const tasksByAssignee: Record<string, any[]> = {};
+    for (const task of tasks) {
+      const assignee = task.assignedTo as any;
+      if (!assignee?._id) continue;
+      const key = assignee._id.toString();
+      if (!tasksByAssignee[key]) tasksByAssignee[key] = [];
+      tasksByAssignee[key].push(task);
+    }
 
-      // Group by status
-      const stats = await Task.aggregate([
-        {
-          $match: {
-            projectId: project._id,
-            $or: [
-              { createdAt: { $gte: monday, $lte: sunday } },
-              { updatedAt: { $gte: monday, $lte: sunday } },
-              { dueDate: { $gte: monday, $lte: sunday } },
-            ],
-          },
-        },
-        { $group: { _id: "$status", count: { $sum: 1 } } },
-      ]);
+    // Send weekly summary email to each assignee
+    for (const [userId, userTasks] of Object.entries(tasksByAssignee)) {
+      const assignee = userTasks[0].assignedTo as any;
 
-      const total = stats.reduce((acc, s) => acc + s.count, 0);
-      const summaryList = stats
-        .map((s) => `<li><b>${s._id}</b>: ${s.count}</li>`)
+      // Count tasks by status
+      const stats: Record<string, number> = {};
+      for (const task of userTasks) {
+        stats[task.status] = (stats[task.status] || 0) + 1;
+      }
+
+      const total = userTasks.length;
+      const summaryList = Object.entries(stats)
+        .map(([status, count]) => `<li><b>${status}</b>: ${count}</li>`)
         .join("");
 
-      // Create a short HTML snippet of key tasks
-      const taskList = tasks
+      const taskList = userTasks
         .slice(0, 5)
         .map(
           (t) => `
           <li>
-            <b>${t.title}</b> (${t.status}) 
-            - due: ${t.dueDate ? new Date(t.dueDate).toDateString() : "N/A"}
+            <b>${t.title}</b> (${t.status})<br/>
+            Project: ${t.projectId?.name || "N/A"}<br/>
+            Due: ${t.dueDate ? new Date(t.dueDate).toDateString() : "N/A"}
           </li>`
         )
         .join("");
 
-      // Send to project owner
-      const owner = project.createdBy as any;
-      if (!owner?.email) continue;
-
       await sendMail({
-        to: owner.email,
-        subject: `Weekly Summary: ${project.name}`,
-        title: `Your Weekly Project Summary`,
+        to: assignee.email,
+        subject: `Your Weekly Task Summary (${monday.toDateString()} – ${sunday.toDateString()})`,
+        title: `Weekly Task Summary`,
         body: `
-          <p>Hello ${owner.name || "Owner"},</p>
-          <p>Here’s your summary for <strong>${project.name}</strong> (${monday.toDateString()} - ${sunday.toDateString()}):</p>
+          <p>Hi ${assignee.name || "there"},</p>
+          <p>Here’s your weekly summary for tasks assigned to you:</p>
           <ul>${summaryList}</ul>
-          <p>Total Tasks This Week: ${total}</p>
+          <p><strong>Total Tasks This Week:</strong> ${total}</p>
           <h4>Highlights:</h4>
           <ul>${taskList}</ul>
-          <p>– Task Manager System</p>
+          <p>Keep up the great work! 💪</p>
+          <p>– Task Manager</p>
         `,
       });
+
+      console.log(`Summary sent to ${assignee.email}`);
     }
 
-    console.log("Weekly summary emails sent successfully.");
+    console.log("Weekly summaries sent successfully.");
   } catch (error) {
     console.error("Error in Weekly Summary Job:", error);
   }

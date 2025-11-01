@@ -5,6 +5,7 @@ import {
   getProjectById,
   updateProject,
   deleteProject,
+  getPaginatedProjects,
 } from "../controllers/projectController";
 import { authenticate } from "../middleware/authMiddleware";
 import { authorize } from "../middleware/roleMiddleware";
@@ -12,6 +13,7 @@ import { authorize } from "../middleware/roleMiddleware";
 const router = express.Router();
 
 router.get("/", authenticate, authorize("admin", "user"), getAllProjects);
+router.get("/paginated", authenticate, authorize("admin", "user"), getPaginatedProjects);
 router.use(authenticate, authorize("admin"));
 router.post("/", createProject);
 router.get("/:id", getProjectById);

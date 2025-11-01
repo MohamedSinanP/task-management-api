@@ -13,6 +13,7 @@ cron.schedule("0 8 * * *", async () => {
 
     // Find tasks due within next 24 hours
     const tasks = await Task.find({
+      isDeleted: false,
       dueDate: { $gte: now, $lte: next24Hours },
       status: { $ne: "Done" },
     })

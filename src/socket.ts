@@ -54,9 +54,3 @@ export const sendNotification = (userId: string, notification: any) => {
   const io = getIO();
   io.to(`user:${userId}`).emit("newNotification", notification);
 };
-
-// Helper function to send notification to admin
-export const sendAdminNotification = (notification: any) => {
-  const io = getIO();
-  io.emit("adminNotification", notification);
-};
