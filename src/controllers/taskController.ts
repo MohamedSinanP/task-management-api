@@ -315,10 +315,11 @@ export const deleteTask = async (req: Request, res: Response) => {
       taskId: task._id,
       projectId: task.projectId,
     });
-    const populatedNotification = await Notification.find({ _id: newNotification._id })
+    const populatedNotification = await Notification.findById({ _id: newNotification._id })
       .populate("taskId", "title status priority")
       .populate("projectId", "name")
       .populate("userId", "name email role");
+    console.log("this is the updated notification", populatedNotification);
 
     // Emit to all listeners of this task and assigned user
     try {
